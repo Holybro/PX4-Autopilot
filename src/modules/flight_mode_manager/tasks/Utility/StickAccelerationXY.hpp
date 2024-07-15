@@ -41,6 +41,7 @@
 
 #include <px4_platform_common/module_params.h>
 #include <lib/mathlib/math/filter/AlphaFilter.hpp>
+#include <lib/collision_prevention/CollisionPrevention.hpp>
 #include <matrix/math.hpp>
 #include <uORB/Subscription.hpp>
 #include <uORB/topics/takeoff_status.h>
@@ -65,6 +66,8 @@ public:
 	void setVelocityConstraint(float vel) { _velocity_constraint = fmaxf(vel, FLT_EPSILON); };
 
 private:
+	CollisionPrevention _collision_prevention{this};
+
 	void applyJerkLimit(const float dt);
 	matrix::Vector2f calculateDrag(matrix::Vector2f drag_coefficient, const float dt, const matrix::Vector2f &stick_xy,
 				       const matrix::Vector2f &vel_sp);
