@@ -58,6 +58,8 @@
 #include <uORB/topics/obstacle_distance.h>
 #include <uORB/topics/vehicle_attitude.h>
 #include <uORB/topics/vehicle_command.h>
+#include <vector>
+#include <string>
 
 using namespace time_literals;
 
@@ -81,7 +83,7 @@ public:
 	 */
 	void modifySetpoint(matrix::Vector2f &original_setpoint, const float max_speed,
 			    const matrix::Vector2f &curr_pos, const matrix::Vector2f &curr_vel);
-
+	void constrainAccelerationSetpoint(matrix::Vector2f &setpoint, const matrix::Vector2f &setpoint_vel);
 protected:
 
 	obstacle_distance_s _obstacle_map_body_frame {};
@@ -118,6 +120,12 @@ protected:
 	//Timing functions. Necessary to mock time in the tests
 	virtual hrt_abstime getTime();
 	virtual hrt_abstime getElapsedTime(const hrt_abstime *ptr);
+	matrix::Vector <float, 36> _coll_const_angle;
+	matrix::Vector <float, 36> _coll_const_dist;
+	matrix::Vector2f _adapted_acc_setpoint;
+	matrix::Vector2f _original_acc_setpoint;
+	matrix::Vector <float, 1> _min_distance;
+	matrix::Vector <float, 1> _mode;
 
 
 private:
@@ -148,7 +156,10 @@ private:
 		(ParamBool<px4::params::CP_GO_NO_DATA>) _param_cp_go_nodata, /**< movement allowed where no data*/
 		(ParamFloat<px4::params::MPC_XY_P>) _param_mpc_xy_p, /**< p gain from position controller*/
 		(ParamFloat<px4::params::MPC_JERK_MAX>) _param_mpc_jerk_max, /**< vehicle maximum jerk*/
-		(ParamFloat<px4::params::MPC_ACC_HOR>) _param_mpc_acc_hor /**< vehicle maximum horizontal acceleration*/
+		(ParamFloat<px4::params::MPC_ACC_HOR>) _param_mpc_acc_hor, /**< vehicle maximum horizontal acceleration*/
+		(ParamInt<px4::params::MPC_POS_MODE>) _param_mpc_pos_mode, /**< position control mode*/
+		(ParamFloat<px4::params::MPC_XY_VEL_P_ACC>) _param_mpc_vel_p_acc, /**< p gain from velocity controller*/
+		(ParamFloat<px4::params::MPC_VEL_MANUAL>) _param_mpc_vel_manual /**< p gain from velocity controller*/
 	)
 
 	/**

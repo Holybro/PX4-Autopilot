@@ -508,13 +508,242 @@ CollisionPrevention::_calculateConstrainedSetpoint(Vector2f &setpoint, const Vec
 	}
 }
 
+void CollisionPrevention::constrainAccelerationSetpoint(matrix::Vector2f &setpoint_accel,
+		const matrix::Vector2f &setpoint_vel)
+{
+	_updateObstacleMap();
+
+	const float col_prev_d = _param_cp_dist.get();
+	const float col_prev_dly = _param_cp_delay.get();
+	const bool move_no_data = _param_cp_go_nodata.get();
+	const float max_jerk = _param_mpc_jerk_max.get();
+	const float max_accel = _param_mpc_acc_hor.get();
+	const float xy_p = _param_mpc_xy_p.get();
+	const float vel_xy_p = _param_mpc_vel_p_acc.get(); // proportional gain for velocity
+	const float max_vel = _param_mpc_vel_manual.get();
+	const matrix::Quatf attitude = Quatf(_sub_vehicle_attitude.get().q);
+	const float vehicle_yaw_angle_rad = Eulerf(attitude).psi();
+
+	const float setpoint_length = setpoint_accel.norm();
+
+	const hrt_abstime constrain_time = getTime();
+	int num_fov_bins = 0;
+
+	float acc_vel_constraint = INFINITY;
+	matrix::Vector2f acc_vel_constraint_dir = {0.f, 0.f};
+	matrix::Vector2f acc_vel_constraint_setpoint = {0.f, 0.f};
+
+	if ((constrain_time - _obstacle_map_body_frame.timestamp) < RANGE_STREAM_TIMEOUT_US) {
+
+		const float min_dist_to_keep = math::max(_obstacle_map_body_frame.min_distance / 100.0f, col_prev_d);
+		bool setpoint_possible = true;
+		matrix::Vector2f new_setpoint = {0.f, 0.f};
+
+		if (setpoint_length > 0.001f) {
+			Vector2f setpoint_dir = setpoint_accel / setpoint_length;
+
+			const float sp_angle_body_frame = atan2f(setpoint_dir(1), setpoint_dir(0)) - vehicle_yaw_angle_rad;
+			const float sp_angle_with_offset_deg = wrap_360(math::degrees(sp_angle_body_frame) -
+							       _obstacle_map_body_frame.angle_offset);
+			int sp_index = floor(sp_angle_with_offset_deg / INTERNAL_MAP_INCREMENT_DEG);
+
+			// change setpoint direction slightly (max by _param_cp_guide_ang degrees) to help guide through narrow gaps
+			_adaptSetpointDirection(setpoint_dir, sp_index, vehicle_yaw_angle_rad);
+
+			float closest_distance = INFINITY;
+			matrix::Vector2f bin_closest_dist = {0.f, 0.f};
+
+
+			for (int i = 0; i < INTERNAL_MAP_USED_BINS; i++) {
+				// delete stale values
+				const hrt_abstime data_age = constrain_time - _data_timestamps[i];
+				const float max_range = _data_maxranges[i] * 0.01f;
+
+				if (data_age > RANGE_STREAM_TIMEOUT_US) {
+					_obstacle_map_body_frame.distances[i] = UINT16_MAX;
+				}
+
+				if (_obstacle_map_body_frame.distances[i] < UINT16_MAX) {
+					num_fov_bins ++;
+				}
+
+				float angle = math::radians((float)i * INTERNAL_MAP_INCREMENT_DEG + _obstacle_map_body_frame.angle_offset);
+				angle = wrap_2pi(vehicle_yaw_angle_rad + angle);
+
+				// get direction of current bin
+				const Vector2f bin_direction = {cosf(angle), sinf(angle)};
+
+				// only consider bins which are between min and max values
+				if (_obstacle_map_body_frame.distances[i] > _obstacle_map_body_frame.min_distance
+				    && _obstacle_map_body_frame.distances[i] < UINT16_MAX) {
+					const float distance = _obstacle_map_body_frame.distances[i] * 0.01f;
+
+					// Assume current velocity is sufficiently close to the setpoint velocity
+					const float curr_vel_parallel = math::max(0.f, setpoint_vel.dot(bin_direction));
+					float delay_distance = curr_vel_parallel * col_prev_dly;
+
+					if (distance < max_range) {
+						delay_distance += curr_vel_parallel * (data_age * 1e-6f);
+					}
+
+					const float stop_distance = math::max(0.f, distance - min_dist_to_keep - delay_distance);
+					const float vel_max_posctrl = xy_p * stop_distance;
+					const float vel_max_smooth = math::trajectory::computeMaxSpeedFromDistance(max_jerk, max_accel, stop_distance, 0.f);
+
+					const float vel_max = math::min(vel_max_posctrl, vel_max_smooth);
+					const float acc_max_postrl = vel_xy_p * (vel_max - curr_vel_parallel) ;
+
+					if (acc_max_postrl < acc_vel_constraint) {
+						acc_vel_constraint = acc_max_postrl;
+						acc_vel_constraint_dir = bin_direction;
+					}
+
+					if (distance < closest_distance) {
+						closest_distance = distance;
+						bin_closest_dist = bin_direction;
+					}
+
+					// calculate closest distance for acceleration constraint
+
+
+				} else if (_obstacle_map_body_frame.distances[i] == UINT16_MAX && i == sp_index) {
+					if (!move_no_data || (move_no_data && _data_fov[i])) {
+						setpoint_possible = false;
+					}
+				}
+			}
+
+			const matrix::Vector2f normal_component = setpoint_dir * (setpoint_dir.dot(bin_closest_dist));
+			const matrix::Vector2f tangential_component = setpoint_dir - normal_component;
+
+
+			if (closest_distance < min_dist_to_keep && setpoint_possible) {
+				float scale = (closest_distance - min_dist_to_keep); // always negative meaning it will push us away from the obstacle
+				new_setpoint = tangential_component * setpoint_length  + bin_closest_dist * xy_p * vel_xy_p *
+					       scale; // scale is on the closest distance vector, as thats the critical direction
+
+			} else if (closest_distance >= min_dist_to_keep && setpoint_possible) {
+				const float scale_distance = math::max(min_dist_to_keep, max_vel / xy_p);
+				float scale = (closest_distance - min_dist_to_keep) / scale_distance;
+				scale *= scale; // square the scale to lower commanded accelerations close to the obstacle
+				scale = math::min(scale, 1.0f);
+
+				_mode(0) = bin_closest_dist.dot(setpoint_dir);
+
+				// only scale accelerations towards the obstacle
+				if (bin_closest_dist.dot(setpoint_dir) > 0) {
+					new_setpoint = (tangential_component + normal_component * scale) * setpoint_length;
+
+				} else {
+					new_setpoint = tangential_component * setpoint_length;
+				}
+
+			}
+
+			if (num_fov_bins == 0) {
+				new_setpoint.setZero();
+				PX4_WARN("No fov bins");
+			}
+
+			acc_vel_constraint_setpoint = acc_vel_constraint_dir * acc_vel_constraint;
+			_adapted_acc_setpoint = bin_closest_dist;
+			_original_acc_setpoint = setpoint_dir;
+			setpoint_accel = new_setpoint + acc_vel_constraint_setpoint;
+			_min_distance(0) = closest_distance;
+
+		} else {
+			// If no setpoint is provided, still apply force when you are close to an obstacle
+			float closest_distance = INFINITY;
+			matrix::Vector2f bin_closest_dist = {0.f, 0.f};
+
+			for (int i = 0; i < INTERNAL_MAP_USED_BINS; i++) {
+				if (constrain_time - _data_timestamps[i] > RANGE_STREAM_TIMEOUT_US) {
+					_obstacle_map_body_frame.distances[i] = UINT16_MAX;
+				}
+
+				//count number of bins in the field of valid_new
+				if (_obstacle_map_body_frame.distances[i] < UINT16_MAX) {
+					num_fov_bins ++;
+				}
+
+				float angle = math::radians((float)i * INTERNAL_MAP_INCREMENT_DEG + _obstacle_map_body_frame.angle_offset);
+				angle = wrap_2pi(vehicle_yaw_angle_rad + angle);
+
+				// get direction of current bin
+				const Vector2f bin_direction = {cosf(angle), sinf(angle)};
+
+				if (_obstacle_map_body_frame.distances[i] > _obstacle_map_body_frame.min_distance
+				    && _obstacle_map_body_frame.distances[i] < UINT16_MAX) {
+					const float distance = _obstacle_map_body_frame.distances[i] * 0.01f;
+
+					if (distance < closest_distance) {
+						closest_distance = distance;
+						bin_closest_dist = bin_direction;
+					}
+				}
+			}
+
+			if (closest_distance < min_dist_to_keep) {
+				float scale = (closest_distance - min_dist_to_keep);
+				new_setpoint = bin_closest_dist * xy_p * vel_xy_p * scale;
+			}
+
+			if (num_fov_bins == 0) {
+				new_setpoint.setZero();
+				PX4_WARN("No fov bins");
+			}
+
+			_adapted_acc_setpoint = new_setpoint;
+			setpoint_accel = new_setpoint;
+			_min_distance(0) = closest_distance;
+		}
+
+	} else {
+		//allow no movement
+		PX4_WARN("No movement");
+		_adapted_acc_setpoint.setZero();
+		_original_acc_setpoint = setpoint_accel;
+		setpoint_accel.setZero();
+
+		// if distance data is stale, switch to Loiter
+		if (getElapsedTime(&_last_timeout_warning) > 1_s && getElapsedTime(&_time_activated) > 1_s) {
+
+			if ((constrain_time - _obstacle_map_body_frame.timestamp) > TIMEOUT_HOLD_US
+			    && getElapsedTime(&_time_activated) > TIMEOUT_HOLD_US) {
+				_publishVehicleCmdDoLoiter();
+			}
+
+			_last_timeout_warning = getTime();
+		}
+	}
+
+	collision_constraints_s	constraints{};
+	constraints.timestamp = getTime();
+	acc_vel_constraint_setpoint.copyTo(constraints.adapted_vel_setpoint);
+	setpoint_vel.copyTo(constraints.original_vel_setpoint);
+	_original_acc_setpoint.copyTo(constraints.original_acc_setpoint);
+	_adapted_acc_setpoint.copyTo(constraints.adapted_acc_setpoint);
+	_min_distance.copyTo(constraints.min_distance);
+	_mode.copyTo(constraints.mode);
+	// store _coll_const_angle and _coll_const_dist in constraints
+	_coll_const_angle.copyTo(constraints.angles);
+	_coll_const_dist.copyTo(constraints.distances);
+	_constraints_pub.publish(constraints);
+}
+
 void
 CollisionPrevention::modifySetpoint(Vector2f &original_setpoint, const float max_speed, const Vector2f &curr_pos,
 				    const Vector2f &curr_vel)
 {
 	//calculate movement constraints based on range data
 	Vector2f new_setpoint = original_setpoint;
-	_calculateConstrainedSetpoint(new_setpoint, curr_pos, curr_vel);
+
+	if (_param_mpc_pos_mode.get() == 4) {
+		_calculateConstrainedSetpoint(new_setpoint, curr_pos, curr_vel);
+
+	} else {
+		_calculateConstrainedSetpoint(new_setpoint, curr_pos, curr_vel);
+	}
 
 	//warn user if collision prevention starts to interfere
 	bool currently_interfering = (new_setpoint(0) < original_setpoint(0) - 0.05f * max_speed
@@ -527,8 +756,15 @@ CollisionPrevention::modifySetpoint(Vector2f &original_setpoint, const float max
 	// publish constraints
 	collision_constraints_s	constraints{};
 	constraints.timestamp = getTime();
-	original_setpoint.copyTo(constraints.original_setpoint);
-	new_setpoint.copyTo(constraints.adapted_setpoint);
+	original_setpoint.copyTo(constraints.original_vel_setpoint);
+	new_setpoint.copyTo(constraints.adapted_vel_setpoint);
+	_original_acc_setpoint.copyTo(constraints.original_acc_setpoint);
+	_adapted_acc_setpoint.copyTo(constraints.adapted_acc_setpoint);
+	_min_distance.copyTo(constraints.min_distance);
+	_mode.copyTo(constraints.mode);
+	// store _coll_const_angle and _coll_const_dist in constraints
+	_coll_const_angle.copyTo(constraints.angles);
+	_coll_const_dist.copyTo(constraints.distances);
 	_constraints_pub.publish(constraints);
 
 	original_setpoint = new_setpoint;
