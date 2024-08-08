@@ -105,7 +105,7 @@ FixedwingAttitudeControl::vehicle_manual_poll(const float yaw_body)
 
 				_att_sp.thrust_body[0] = (_manual_control_setpoint.throttle + 1.f) * .5f;
 
-				Quatf q(Eulerf(roll_body, pitch_body, yaw_body));
+				const Quatf q(Eulerf(roll_body, pitch_body, yaw_body));
 				q.copyTo(_att_sp.q_d);
 
 				_att_sp.reset_integral = false;
