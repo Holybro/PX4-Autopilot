@@ -157,6 +157,8 @@ private:
 
 	float _rtl_alt{0.0f};	///< AMSL altitude at which the vehicle should return to the home position
 
+	bool _print_return_alt_higher_than_max_hagl{false};
+
 	DEFINE_PARAMETERS(
 		(ParamFloat<px4::params::RTL_DESCEND_ALT>) _param_rtl_descend_alt,
 		(ParamFloat<px4::params::RTL_LAND_DELAY>)  _param_rtl_land_delay,
