@@ -325,7 +325,7 @@ void FixedwingAttitudeControl::Run()
 
 			if (_vcontrol_mode.flag_control_attitude_enabled && _in_fw_or_transition_wo_tailsitter_transition) {
 				const Eulerf setpoint(Quatf(_att_sp.q_d));
-				float roll_body = setpoint.phi();
+				const float roll_body = setpoint.phi();
 				float pitch_body = setpoint.theta();
 
 				if (PX4_ISFINITE(roll_body) && PX4_ISFINITE(pitch_body)) {
