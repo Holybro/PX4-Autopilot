@@ -65,11 +65,11 @@ Vector3f Ekf::calcEarthRateNED(float lat_rad) const
 
 bool Ekf::getEkfGlobalOrigin(uint64_t &origin_time, double &latitude, double &longitude, float &origin_alt) const
 {
-	origin_time = _pos_ref.getProjectionReferenceTimestamp();
-	latitude = _pos_ref.getProjectionReferenceLat();
-	longitude = _pos_ref.getProjectionReferenceLon();
+	origin_time = _ned_global_ref.getProjectionReferenceTimestamp();
+	latitude = _ned_global_ref.getProjectionReferenceLat();
+	longitude = _ned_global_ref.getProjectionReferenceLon();
 	origin_alt  = getEkfGlobalOriginAltitude();
-	return _NED_origin_initialised;
+	return _ned_global_ref.isInitialized();
 }
 
 bool Ekf::setEkfGlobalOrigin(const double latitude, const double longitude, const float altitude, const float eph,
@@ -80,20 +80,20 @@ bool Ekf::setEkfGlobalOrigin(const double latitude, const double longitude, cons
 	    && PX4_ISFINITE(longitude) && (abs(longitude) <= 180)
 	    && PX4_ISFINITE(altitude) && (altitude > -12'000.f) && (altitude < 100'000.f)
 	   ) {
-		bool current_pos_available = false;
+		bool current_gpos_available = false;
 		double current_lat = static_cast<double>(NAN);
 		double current_lon = static_cast<double>(NAN);
 
 		// if we are already doing aiding, correct for the change in position since the EKF started navigating
-		if (_pos_ref.isInitialized() && isHorizontalAidingActive()) {
-			_pos_ref.reproject(_state.pos(0), _state.pos(1), current_lat, current_lon);
-			current_pos_available = true;
+		if (_ned_global_ref.isInitialized() && isGlobalHorizontalPositionValid()) {
+			_ned_global_ref.reproject(_state.pos(0), _state.pos(1), current_lat, current_lon);
+			current_gpos_available = true;
 		}
 
 		const float gps_alt_ref_prev = _gps_alt_ref;
 
 		// reinitialize map projection to latitude, longitude, altitude, and reset position
-		_pos_ref.initReference(latitude, longitude, _time_delayed_us);
+		_ned_global_ref.initReference(latitude, longitude, _time_delayed_us);
 		_gps_alt_ref = altitude;
 
 #if defined(CONFIG_EKF2_MAGNETOMETER)
@@ -114,15 +114,17 @@ bool Ekf::setEkfGlobalOrigin(const double latitude, const double longitude, cons
 		_gpos_origin_eph = eph;
 		_gpos_origin_epv = epv;
 
-		_NED_origin_initialised = true;
-
-		if (current_pos_available) {
-			// reset horizontal position if we already have a global origin
-			Vector2f position = _pos_ref.project(current_lat, current_lon);
+		if (current_gpos_available) {
+			// reset horizontal position if we already have a global reference
+			Vector2f position = _ned_global_ref.project(current_lat, current_lon);
 			resetHorizontalPositionTo(position);
+			_ned_global_ref_valid = true;
+
+		} else if (isLocalHorizontalPositionValid()) {
+			_ned_global_ref_valid = true;
 		}
 
-		if (PX4_ISFINITE(gps_alt_ref_prev) && isVerticalPositionAidingActive()) {
+		if (PX4_ISFINITE(gps_alt_ref_prev) && isGlobalVerticalPositionValid()) {
 			// determine current z
 			const float z_prev = _state.pos(2);
 			const float current_alt = -z_prev + gps_alt_ref_prev;
@@ -149,7 +151,7 @@ void Ekf::get_ekf_gpos_accuracy(float *ekf_eph, float *ekf_epv) const
 	float eph = INFINITY;
 	float epv = INFINITY;
 
-	if (global_origin_valid()) {
+	if (_ned_global_ref_valid) {
 		// report absolute accuracy taking into account the uncertainty in location of the origin
 		eph = sqrtf(P.trace<2>(State::pos.idx + 0) + sq(_gpos_origin_eph));
 		epv = sqrtf(P.trace<1>(State::pos.idx + 2) + sq(_gpos_origin_epv));
@@ -602,19 +604,19 @@ uint16_t Ekf::get_ekf_soln_status() const
 	soln_status.flags.attitude = attitude_valid();
 
 	// 2	ESTIMATOR_VELOCITY_HORIZ	True if the horizontal velocity estimate is good
-	soln_status.flags.velocity_horiz = local_position_is_valid();
+	soln_status.flags.velocity_horiz = isLocalHorizontalPositionValid();
 
 	// 4	ESTIMATOR_VELOCITY_VERT	True if the vertical velocity estimate is good
 	soln_status.flags.velocity_vert = isLocalVerticalVelocityValid() || isLocalVerticalPositionValid();
 
 	// 8	ESTIMATOR_POS_HORIZ_REL	True if the horizontal position (relative) estimate is good
-	soln_status.flags.pos_horiz_rel = local_position_is_valid();
+	soln_status.flags.pos_horiz_rel = isLocalHorizontalPositionValid();
 
 	// 16	ESTIMATOR_POS_HORIZ_ABS	True if the horizontal position (absolute) estimate is good
-	soln_status.flags.pos_horiz_abs = global_position_is_valid();
+	soln_status.flags.pos_horiz_abs = isGlobalHorizontalPositionValid();
 
 	// 32	ESTIMATOR_POS_VERT_ABS	True if the vertical position (absolute) estimate is good
-	soln_status.flags.pos_vert_abs = isVerticalAidingActive();
+	soln_status.flags.pos_vert_abs = isGlobalVerticalPositionValid();
 
 	// 64	ESTIMATOR_POS_VERT_AGL	True if the vertical position (above ground) estimate is good
 #if defined(CONFIG_EKF2_TERRAIN)
@@ -775,7 +777,6 @@ void Ekf::updateHorizontalDeadReckoningstatus()
 
 	if (inertial_dead_reckoning) {
 		if (isTimedOut(_time_last_horizontal_aiding, (uint64_t)_params.valid_timeout_max)) {
-			// deadreckon time exceeded
 			if (!_horizontal_deadreckon_time_exceeded) {
 				ECL_WARN("horizontal dead reckon time exceeded");
 				_horizontal_deadreckon_time_exceeded = true;

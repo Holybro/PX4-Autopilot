@@ -282,28 +282,29 @@ public:
 	void resetAccelBias();
 	void resetAccelBiasCov();
 
-	// return true if the global position estimate is valid
-	// return true if the origin is set we are not doing unconstrained free inertial navigation
-	// and have not started using synthetic position observations to constrain drift
-	bool global_position_is_valid() const
+	bool isGlobalHorizontalPositionValid() const
 	{
-		return (_NED_origin_initialised && local_position_is_valid());
+		return _ned_global_ref_valid && isLocalHorizontalPositionValid();
 	}
 
-	// return true if the local position estimate is valid
-	bool local_position_is_valid() const
+	bool isGlobalVerticalPositionValid() const
 	{
-		return (!_horizontal_deadreckon_time_exceeded && !_control_status.flags.fake_pos);
+		return _ned_global_ref_valid && isLocalVerticalPositionValid();
+	}
+
+	bool isLocalHorizontalPositionValid() const
+	{
+		return !_horizontal_deadreckon_time_exceeded;
 	}
 
 	bool isLocalVerticalPositionValid() const
 	{
-		return !_vertical_position_deadreckon_time_exceeded && !_control_status.flags.fake_hgt;
+		return !_vertical_position_deadreckon_time_exceeded;
 	}
 
 	bool isLocalVerticalVelocityValid() const
 	{
-		return !_vertical_velocity_deadreckon_time_exceeded && !_control_status.flags.fake_hgt;
+		return !_vertical_velocity_deadreckon_time_exceeded;
 	}
 
 	bool isYawFinalAlignComplete() const
