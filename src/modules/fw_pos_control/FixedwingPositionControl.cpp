@@ -1675,6 +1675,7 @@ FixedwingPositionControl::control_auto_takeoff(const hrt_abstime &now, const flo
 	}
 
 	_flaps_setpoint = _param_fw_flaps_to_scl.get();
+
 	if (!_vehicle_status.in_transition_to_fw) {
 		publishLocalPositionSetpoint(pos_sp_curr);
 	}
